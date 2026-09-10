@@ -26,3 +26,13 @@ export const historicalData = {
     },
   ],
 };
+
+export const latestQuotes = {
+  AAPL: {
+    last: 204,
+    bid: 203.95,
+    ask: 204.05,
+    currency: "USD",
+    timestamp: "2026-09-03T15:30:00Z",
+  },
+};
