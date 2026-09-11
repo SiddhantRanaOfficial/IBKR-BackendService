@@ -13,7 +13,7 @@ app.use(express.json());
 app.get('/health', (req, res) => {
   return res.json({
     status: 'OK',
-    message: 'IBKR Backend Service is running'
+    message: 'IBKR Backend Service is running bluck'
   });
 });
 

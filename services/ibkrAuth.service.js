@@ -174,3 +174,79 @@ export async function getIBKRSessionToken() {
 
   return sessionTokenPromise;
 }
+
+// Send an authenticated request using the SSO session token.
+async function postBrokerageRequest(path, sessionToken, body) {
+  const response = await fetch(
+    `https://api.ibkr.com/v1/api${path}`,
+    {
+      method: 'POST',
+
+      headers: {
+        'User-Agent': `IBKR-BackendService/1.0 Node.js/${process.versions.node}`,
+        Accept: '*/*',
+        Authorization: `Bearer ${sessionToken}`,
+        'Content-Type': 'application/json'
+      },
+
+      body: body === undefined
+        ? undefined
+        : JSON.stringify(body),
+
+      signal: AbortSignal.timeout(10000)
+    }
+  );
+
+  if (!response.ok) {
+    if (
+      response.status === 401 &&
+      cachedSessionToken === sessionToken
+    ) {
+      cachedSessionToken = null;
+    }
+
+    throw new Error(
+      `IBKR request to ${path} failed: HTTP ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error(`IBKR returned an error for ${path}`);
+  }
+
+  return data;
+}
+
+// Read the current brokerage status.
+export async function getBrokerageSessionStatus(sessionToken) {
+  const data = await postBrokerageRequest(
+    '/iserver/auth/status',
+    sessionToken
+  );
+
+  // Support the direct response and the wrapped documentation example.
+  const status = data.success?.value ?? data;
+
+  return {
+    authenticated: status.authenticated === true,
+    connected: status.connected === true,
+    established: status.established === true,
+    competing: status.competing === true
+  };
+}
+
+// Request initialization, then check whether brokerage access is ready.
+export async function initializeBrokerageSession(sessionToken) {
+  await postBrokerageRequest(
+    '/iserver/auth/ssodh/init',
+    sessionToken,
+    {
+      publish: true,
+      compete: false
+    }
+  );
+
+  return getBrokerageSessionStatus(sessionToken);
+}
