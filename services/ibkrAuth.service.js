@@ -250,3 +250,39 @@ export async function initializeBrokerageSession(sessionToken) {
 
   return getBrokerageSessionStatus(sessionToken);
 }
+
+export async function getBrokerageRequest(path, sessionToken) {
+  const response = await fetch(
+    `https://api.ibkr.com/v1/api${path}`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        Accept: 'application/json',
+        'User-Agent': `IBKR-BackendService/1.0 Node.js/${process.versions.node}`
+      },
+      signal: AbortSignal.timeout(10000)
+    }
+  );
+
+  if (!response.ok) {
+    if (
+      response.status === 401 &&
+      cachedSessionToken === sessionToken
+    ) {
+      cachedSessionToken = null;
+    }
+
+    throw new Error(
+      `IBKR request failed: HTTP ${response.status}`
+    );
+  }
+
+  const data = await response.json();
+
+  if (data.error) {
+    throw new Error('IBKR returned an error response');
+  }
+
+  return data;
+}
