@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import authRoutes from '../routes/auth.routes.js';
 import { errorHandler } from '../middleware/error.middleware.js';
+import marketDataRoutes from '../routes/marketData.routes.js';
 
 const app = express();
 
@@ -18,6 +19,8 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+
+app.use('/api/marketdata', marketDataRoutes);
 
 app.use(errorHandler);
 
