@@ -6,6 +6,9 @@ import jwt from 'jsonwebtoken';
 let cachedSessionToken = null;
 let sessionTokenPromise = null;
 
+let keepAliveTimer = null;
+let tickleInProgress = false;
+
 // Here I create the assertion for the OAuth access-token request.
 function createClientAssertion() {
   const now = Math.floor(Date.now() / 1000);
@@ -165,6 +168,7 @@ export async function getIBKRSessionToken() {
     sessionTokenPromise = requestIBKRSessionToken()
       .then((token) => {
         cachedSessionToken = token;
+        startIBKRKeepAlive();
         return token;
       })
       .finally(() => {
@@ -285,4 +289,65 @@ export async function getBrokerageRequest(path, sessionToken) {
   }
 
   return data;
+}
+
+function startIBKRKeepAlive() {
+  // Repeated authentication requests must not create more timers.
+  if (keepAliveTimer) {
+    return;
+  }
+
+  keepAliveTimer = setInterval(async () => {
+    // Only ping an existing session.
+    // Do not create a new session from this background task.
+    if (!cachedSessionToken || tickleInProgress) {
+      return;
+    }
+
+    tickleInProgress = true;
+
+    // Capture the token used for this particular request.
+    const sessionToken = cachedSessionToken;
+
+    try {
+      const data = await postBrokerageRequest(
+        '/tickle',
+        sessionToken
+      );
+
+      // Ignore an old response if the cached token changed.
+      if (cachedSessionToken !== sessionToken) {
+        return;
+      }
+
+      const status = data.iserver?.authStatus;
+
+      console.log('[IBKR keep-alive] Ping succeeded', {
+        authenticated: status?.authenticated,
+        connected: status?.connected,
+        ssoExpires: data.ssoExpires
+      });
+
+      if (
+        status?.authenticated === false ||
+        status?.connected === false ||
+        status?.competing === true
+      ) {
+        console.warn(
+          '[IBKR keep-alive] Brokerage is not ready. ' +
+          'Check GET /api/auth/status before requesting market data.'
+        );
+      }
+    } catch (error) {
+      console.error(
+        '[IBKR keep-alive] Ping failed:',
+        error.message
+      );
+    } finally {
+      tickleInProgress = false;
+    }
+  }, 60_000);
+
+  // The timer alone should not prevent Node.js from exiting.
+  keepAliveTimer.unref();
 }
