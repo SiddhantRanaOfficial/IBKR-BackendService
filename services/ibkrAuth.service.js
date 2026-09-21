@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import jwt from 'jsonwebtoken';
+// STEP 4 SIMPLIFIED: ordinary pacing functions shared by GET and POST.
+import { checkRequestLimit, blockRequests } from './ibkrPacing.service.js';
 
 // Here the session token will be cached so other requests don't have to re-authenticate everytime
 
@@ -179,48 +181,106 @@ export async function getIBKRSessionToken() {
   return sessionTokenPromise;
 }
 
-// Send an authenticated request using the SSO session token.
-async function postBrokerageRequest(path, sessionToken, body) {
-  const response = await fetch(
-    `https://api.ibkr.com/v1/api${path}`,
-    {
-      method: 'POST',
+// STEP 4 SIMPLIFIED: request handling lives beside the session token it manages.
+function brokerageError(message, statusCode, upstreamStatus) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  if (upstreamStatus !== undefined) error.upstreamStatus = upstreamStatus;
+  return error;
+}
 
-      headers: {
-        'User-Agent': `IBKR-BackendService/1.0 Node.js/${process.versions.node}`,
-        Accept: '*/*',
-        Authorization: `Bearer ${sessionToken}`,
-        'Content-Type': 'application/json'
-      },
+// Normalize Retry-After to safe integer seconds; never echo unchecked headers.
+function readRetryAfter(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  let seconds;
+  if (/^\d+$/.test(trimmed)) {
+    seconds = Number(trimmed);
+  } else if (/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(trimmed)) {
+    seconds = Math.ceil((Date.parse(trimmed) - Date.now()) / 1000);
+  } else {
+    return null;
+  }
+  if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > Number.MAX_SAFE_INTEGER / 1000) {
+    return null;
+  }
+  return Math.max(1, seconds);
+}
 
-      body: body === undefined
-        ? undefined
-        : JSON.stringify(body),
+async function brokerageRequest(path, sessionToken, method = 'GET', body) {
+  const headers = {
+    Authorization: `Bearer ${sessionToken}`,
+    Accept: method === 'POST' ? '*/*' : 'application/json',
+    'User-Agent': `IBKR-BackendService/1.0 Node.js/${process.versions.node}`
+  };
+  if (method === 'POST') headers['Content-Type'] = 'application/json';
+  const serializedBody = body === undefined ? undefined : JSON.stringify(body);
+  const signal = AbortSignal.timeout(10_000);
 
-      signal: AbortSignal.timeout(10000)
+  // Every brokerage GET/POST, including status/init/tickle, consumes this budget.
+  checkRequestLimit(path);
+  let response;
+  try {
+    response = await fetch(`https://api.ibkr.com/v1/api${path}`, {
+      method, headers, body: serializedBody, signal
+    });
+  } catch (error) {
+    if (signal.aborted || error?.name === 'TimeoutError') {
+      throw brokerageError('IBKR request timed out. Try again later.', 504);
     }
-  );
+    throw brokerageError('Unable to communicate with IBKR. Try again later.', 502);
+  }
 
   if (!response.ok) {
-    if (
-      response.status === 401 &&
-      cachedSessionToken === sessionToken
-    ) {
-      cachedSessionToken = null;
+    const upstreamStatus = response.status;
+    const retryAfter = readRetryAfter(response.headers.get('Retry-After'));
+    let error;
+    if (upstreamStatus === 401) {
+      // A late failure from an old token must not clear a newer session.
+      if (cachedSessionToken === sessionToken) cachedSessionToken = null;
+      error = brokerageError('IBKR session expired. Call POST /api/auth/connect to reconnect.', 503, 401);
+    } else if (upstreamStatus === 429) {
+      // IBKR documents a 15-minute penalty period. Use it when no valid hint exists.
+      const cooldown = retryAfter ?? 900;
+      blockRequests(cooldown);
+      error = brokerageError('IBKR rate limit reached. Retry after the indicated delay.', 429, 429);
+      error.retryAfter = cooldown;
+    } else if (upstreamStatus === 503) {
+      error = brokerageError('IBKR is temporarily unavailable. Try again later.', 503, 503);
+      if (retryAfter !== null) error.retryAfter = retryAfter;
+    } else if (upstreamStatus === 504) {
+      error = brokerageError('IBKR request timed out. Try again later.', 504, 504);
+    } else if (upstreamStatus === 400 && path.split('?')[0] === '/iserver/marketdata/history') {
+      error = brokerageError('IBKR rejected the historical data query. Check the contract and period/bar combination.', 400, 400);
+    } else if (upstreamStatus === 403) {
+      error = brokerageError('IBKR denied access. Check account permissions and market data subscriptions.', 502, 403);
+    } else {
+      error = brokerageError('IBKR could not complete the request. Try again later.', 502, upstreamStatus);
     }
 
-    throw new Error(
-      `IBKR request to ${path} failed: HTTP ${response.status}`
-    );
+    // Discard unread error bodies; raw IBKR messages may contain sensitive details.
+    // Do not retry automatically, especially POST session initialization.
+    try { await response.body?.cancel(); } catch { /* Preserve the HTTP failure. */ }
+    throw error;
   }
 
-  const data = await response.json();
-
-  if (data.error) {
-    throw new Error(`IBKR returned an error for ${path}`);
+  let data;
+  try {
+    data = await response.json();
+  } catch (error) {
+    if (signal.aborted || error?.name === 'TimeoutError') {
+      throw brokerageError('IBKR request timed out while reading the response.', 504, response.status);
+    }
+    throw brokerageError('IBKR returned an unreadable JSON response.', 502, response.status);
   }
-
+  if (data === null || typeof data !== 'object' || Object.hasOwn(data, 'error')) {
+    throw brokerageError('IBKR returned an invalid or error response.', 502, response.status);
+  }
   return data;
+}
+
+async function postBrokerageRequest(path, sessionToken, body) {
+  return brokerageRequest(path, sessionToken, 'POST', body);
 }
 
 // Read the current brokerage status.
@@ -256,39 +316,7 @@ export async function initializeBrokerageSession(sessionToken) {
 }
 
 export async function getBrokerageRequest(path, sessionToken) {
-  const response = await fetch(
-    `https://api.ibkr.com/v1/api${path}`,
-    {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${sessionToken}`,
-        Accept: 'application/json',
-        'User-Agent': `IBKR-BackendService/1.0 Node.js/${process.versions.node}`
-      },
-      signal: AbortSignal.timeout(10000)
-    }
-  );
-
-  if (!response.ok) {
-    if (
-      response.status === 401 &&
-      cachedSessionToken === sessionToken
-    ) {
-      cachedSessionToken = null;
-    }
-
-    throw new Error(
-      `IBKR request failed: HTTP ${response.status}`
-    );
-  }
-
-  const data = await response.json();
-
-  if (data.error) {
-    throw new Error('IBKR returned an error response');
-  }
-
-  return data;
+  return brokerageRequest(path, sessionToken);
 }
 
 function startIBKRKeepAlive() {

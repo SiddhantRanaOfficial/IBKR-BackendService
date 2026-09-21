@@ -6,7 +6,9 @@ import marketDataRoutes from '../routes/marketData.routes.js';
 
 const app = express();
 
-app.use(cors());
+// enables browser clients have access to the Retry-After response header.
+app.use(cors({ exposedHeaders: ['Retry-After'] }));
+
 app.use(express.json());
 
 
