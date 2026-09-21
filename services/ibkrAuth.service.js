@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import jwt from 'jsonwebtoken';
-// STEP 4 SIMPLIFIED: ordinary pacing functions shared by GET and POST.
+// Ordinary pacing functions shared by GET and POST.
 import { checkRequestLimit, blockRequests } from './ibkrPacing.service.js';
 
 // Here the session token will be cached so other requests don't have to re-authenticate everytime
@@ -181,7 +181,7 @@ export async function getIBKRSessionToken() {
   return sessionTokenPromise;
 }
 
-// STEP 4 SIMPLIFIED: request handling lives beside the session token it manages.
+// Request handling lives beside the session token it manages.
 function brokerageError(message, statusCode, upstreamStatus) {
   const error = new Error(message);
   error.statusCode = statusCode;
