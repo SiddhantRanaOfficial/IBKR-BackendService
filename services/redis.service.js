@@ -42,7 +42,7 @@ export async function connectRedis() {
     socket: { connectTimeout: TIMEOUT_MS, reconnectStrategy: false }
   });
   // Redis requires an error listener. This prevents printing of raw URLs and raw-credential bearing errors
-  candidate.on('error', () => console.warn('[Redis] Connection error.', {
+  candidate.on('error', (error) => console.warn('[Redis] Connection error.', {
     code: error.code,
     name: error.name
   }));
