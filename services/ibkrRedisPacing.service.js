@@ -1,7 +1,23 @@
-// REDIS PHASE 2 SIMPLIFIED: Stage 4 remains in ibkrPacing.service.js, unchanged.
+// Redis Rate Limiter; Local Rate Limiter remains preserved in ibkrPacingService.js
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { connectRedis, readRedisConfig } from './redis.service.js';
+import { performance } from 'node:perf_hooks';
+import { connectRedis, readRedisConfig, withRedisCommandTimeout } from './redis.service.js';
+
+// retain an observed cooldown if publication fails. This is not
+// a local request counter: admission still always requires Redis approval.
+let pendingCooldownUntil = 0;
+
+async function publishPendingCooldown() {
+  const deadline = pendingCooldownUntil;
+  const remainingMilliseconds = Math.ceil(deadline - performance.now());
+  if (remainingMilliseconds > 0) {
+    const { cooldownKey } = getRedisKeys();
+    await runRedisScript(extendCooldownScript, [cooldownKey], [String(remainingMilliseconds)]);
+  }
+  // Do not erase a longer cooldown received while the Redis call was pending.
+  if (pendingCooldownUntil === deadline) pendingCooldownUntil = 0;
+}
 
 // Read once when this module loads, not on every request.
 const checkRequestLimitScript = readFileSync(
@@ -26,9 +42,10 @@ function getRedisKeys() {
 async function runRedisScript(script, keys, scriptArguments) {
   try {
     const client = await connectRedis();
-    const result = await client.withCommandOptions({
-      abortSignal: AbortSignal.timeout(5000)
-    }).eval(script, { keys, arguments: scriptArguments });
+    // REDIS PHASE 4: enforce the deadline even after Redis receives the script.
+    const result = await withRedisCommandTimeout(client, () =>
+      client.eval(script, { keys, arguments: scriptArguments })
+    );
     if (!Number.isSafeInteger(result) || result < 0) {
       throw new Error('Invalid limiter response');
     }
@@ -46,6 +63,8 @@ export async function checkRequestLimit(path) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new TypeError('An IBKR endpoint path is required.');
   }
+  // REDIS PHASE 3: recover unpublished cooldowns before any new admission.
+  if (pendingCooldownUntil > 0) await publishPendingCooldown();
   const endpoint = path.split('?')[0];
   const isHistoryRequest = endpoint === '/iserver/marketdata/history';
   const { globalRequestsKey, historyRequestsKey, cooldownKey } = getRedisKeys();
@@ -70,6 +89,7 @@ export async function blockRequests(seconds) {
     !Number.isSafeInteger(seconds * 1000)) {
     throw new TypeError('Cooldown must be positive integer seconds within a safe millisecond range.');
   }
-  const { cooldownKey } = getRedisKeys();
-  await runRedisScript(extendCooldownScript, [cooldownKey], [String(seconds * 1000)]);
+  // REDIS PHASE 3: remember first, then publish; errors leave the deadline intact.
+  pendingCooldownUntil = Math.max(pendingCooldownUntil, performance.now() + seconds * 1000);
+  await publishPendingCooldown();
 }
