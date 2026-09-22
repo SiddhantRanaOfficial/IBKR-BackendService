@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { connectRedis, readRedisConfig, withRedisCommandTimeout } from './redis.service.js';
 
-// retain an observed cooldown if publication fails. This is not
+// Retain an observed cooldown if publication fails. This is not
 // a local request counter: admission still always requires Redis approval.
 let pendingCooldownUntil = 0;
 
@@ -42,7 +42,7 @@ function getRedisKeys() {
 async function runRedisScript(script, keys, scriptArguments) {
   try {
     const client = await connectRedis();
-    // REDIS PHASE 4: enforce the deadline even after Redis receives the script.
+    // Enforced the deadline even after Redis receives the script.
     const result = await withRedisCommandTimeout(client, () =>
       client.eval(script, { keys, arguments: scriptArguments })
     );
@@ -63,7 +63,7 @@ export async function checkRequestLimit(path) {
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new TypeError('An IBKR endpoint path is required.');
   }
-  // REDIS PHASE 3: recover unpublished cooldowns before any new admission.
+  // Recover unpublished cooldowns before any new admission.
   if (pendingCooldownUntil > 0) await publishPendingCooldown();
   const endpoint = path.split('?')[0];
   const isHistoryRequest = endpoint === '/iserver/marketdata/history';
