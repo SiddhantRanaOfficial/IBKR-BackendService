@@ -104,6 +104,8 @@ export async function withRedisCommandTimeout(connection, operation) {
 
 export async function closeRedis() {
   // Call this after stopping application work. No new commands should start during shutdown.
+  // the surrounding application should first stop accepting or scheduling work that needs Redis.
+  // Otherwise, this could close Redis while another task is still trying to use it.
   const pending = connecting;
   if (client?.isOpen) client.destroy();
   client = undefined;
