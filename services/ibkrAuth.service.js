@@ -1,7 +1,9 @@
 import 'dotenv/config';
 import jwt from 'jsonwebtoken';
 // Ordinary pacing functions shared by GET and POST.
-import { checkRequestLimit, blockRequests } from './ibkrPacing.service.js';
+// Preserved LocalRateLimiter imports for reference; Redis now owns admission.
+// import { checkRequestLimit, blockRequests } from './ibkrPacing.service.js';
+import { checkRequestLimit, blockRequests } from './ibkrRedisPacing.service.js';
 
 // Here the session token will be cached so other requests don't have to re-authenticate everytime
 
@@ -10,6 +12,8 @@ let sessionTokenPromise = null;
 
 let keepAliveTimer = null;
 let tickleInProgress = false;
+// Shutdown must not start another background keep-alive.
+let keepAliveStopped = false;
 
 // Here I create the assertion for the OAuth access-token request.
 function createClientAssertion() {
@@ -215,10 +219,13 @@ async function brokerageRequest(path, sessionToken, method = 'GET', body) {
   };
   if (method === 'POST') headers['Content-Type'] = 'application/json';
   const serializedBody = body === undefined ? undefined : JSON.stringify(body);
-  const signal = AbortSignal.timeout(10_000);
+  // original timeout moved below the awaited Redis decision.
+  // const signal = AbortSignal.timeout(10_000);
 
   // Every brokerage GET/POST, including status/init/tickle, consumes this budget.
-  checkRequestLimit(path);
+  // checkRequestLimit(path); // Stage 4 synchronous call, preserved for reference.
+  await checkRequestLimit(path);
+  const signal = AbortSignal.timeout(10_000);
   let response;
   try {
     response = await fetch(`https://api.ibkr.com/v1/api${path}`, {
@@ -242,8 +249,16 @@ async function brokerageRequest(path, sessionToken, method = 'GET', body) {
     } else if (upstreamStatus === 429) {
       // IBKR documents a 15-minute penalty period. Use it when no valid hint exists.
       const cooldown = retryAfter ?? 900;
-      blockRequests(cooldown);
-      error = brokerageError('IBKR rate limit reached. Retry after the indicated delay.', 429, 429);
+      // blockRequests(cooldown); // local cooldown, preserved for reference.
+      // error = brokerageError('IBKR rate limit reached. Retry after the indicated delay.', 429, 429);
+      // publishing failure is unavailable, not a confirmed shared block.
+      // Continue to the common body cleanup even when Redis fails.
+      try {
+        await blockRequests(cooldown);
+        error = brokerageError('IBKR rate limit reached. Retry after the indicated delay.', 429, 429);
+      } catch {
+        error = brokerageError('Unable to publish the IBKR cooldown. Try again later.', 503, 429);
+      }
       error.retryAfter = cooldown;
     } else if (upstreamStatus === 503) {
       error = brokerageError('IBKR is temporarily unavailable. Try again later.', 503, 503);
@@ -320,6 +335,8 @@ export async function getBrokerageRequest(path, sessionToken) {
 }
 
 function startIBKRKeepAlive() {
+  // an in-flight authentication request may finish during shutdown.
+  if (keepAliveStopped) return;
   // Repeated authentication requests must not create more timers.
   if (keepAliveTimer) {
     return;
@@ -378,4 +395,11 @@ function startIBKRKeepAlive() {
 
   // The timer alone should not prevent Node.js from exiting.
   keepAliveTimer.unref();
+}
+
+// stop scheduling background work before closing Redis.
+export function stopIBKRKeepAlive() {
+  keepAliveStopped = true;
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
 }
