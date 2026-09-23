@@ -21,15 +21,17 @@ local nowMilliseconds = tonumber(redisTime[1]) * 1000
 redis.call('ZREMRANGEBYSCORE', globalRequestsKey, '-inf', nowMilliseconds - globalWindowMilliseconds)
 redis.call('ZREMRANGEBYSCORE', historyRequestsKey, '-inf', nowMilliseconds - historyWindowMilliseconds)
 
--- PTTL returns the remaining lifetime in milliseconds.
--- -2 means absent; -1 means no expiry, which is invalid for our cooldown.
+-- PTTL returns the remaining lifetime in milliseconds of the key passed as an argument.   
+-- It returns -2 if the key does not exist and -1 if the key exists but has no associated expire(which is invalid for our cooldown). 
+-- This will be used to check if the cooldown is active.
 local cooldownRemaining = redis.call('PTTL', cooldownKey)
 if cooldownRemaining == -1 then
   return redis.error_reply('Cooldown has no expiry')
 end
 local retryAfterMilliseconds = math.max(0, cooldownRemaining)
 
--- Find when enough recorded requests will leave a full window.
+-- This function finds when enough recorded requests will leave a full window
+-- making space for a new request. It returns zero if the window is not full.
 local function getWindowWait(requestsKey, limit, windowMilliseconds)
   local requestCount = redis.call('ZCARD', requestsKey)
   if requestCount < limit then
@@ -65,3 +67,6 @@ if isHistoryRequest then
 end
 -- Zero means request is allowed while positive values mean how many milliseconds to wait.
 return 0
+
+-- This however doesn't support rollback of an admitted request 
+-- incase something goes wrong in the backend service after admission.
