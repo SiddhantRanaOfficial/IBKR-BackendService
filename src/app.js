@@ -3,6 +3,7 @@ import cors from 'cors';
 import authRoutes from '../routes/auth.routes.js';
 import { errorHandler } from '../middleware/error.middleware.js';
 import marketDataRoutes from '../routes/marketData.routes.js';
+import instrumentRoutes from '../routes/instrument.routes.js';
 
 const app = express();
 
@@ -23,6 +24,10 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 
 app.use('/api/marketdata', marketDataRoutes);
+
+// Instrument search
+app.use('/api/instruments', instrumentRoutes);
+
 
 app.use(errorHandler);
 
