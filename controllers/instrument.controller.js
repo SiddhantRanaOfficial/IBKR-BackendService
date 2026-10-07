@@ -1,8 +1,12 @@
-// INSTRUMENT SEARCH PHASE 1 — NEW FILE: use the existing API response envelope.
-import { createInstrumentService } from '../services/instrument.service.js';
+// Using the existing API response envelope for giving different endpoints a consistent response format.
+// Kept earlier wiring (pre-autocomplete search feature) for reference.
+// import { createInstrumentService } from '../services/instrument.service.js';
+import { createInstrumentAutocompleteService } from '../services/instrumentAutocomplete.service.js';
 import { getBrokerageRequest } from '../services/ibkrAuth.service.js';
 
-const searchInstruments = createInstrumentService({ getBrokerageRequest });
+// Ranking/Caching now precede the caller's limit unlike pre-autocompletion feature
+// const searchInstruments = createInstrumentService({ getBrokerageRequest });
+const searchInstruments = createInstrumentAutocompleteService({ getBrokerageRequest });
 
 export async function searchInstrumentsController(req, res, next) {
   try {

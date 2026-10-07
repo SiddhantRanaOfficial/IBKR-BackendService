@@ -89,15 +89,20 @@ export async function pingRedis() {
 // Closing it does NOT undo a script that already executed; never auto-retry it.
 export async function withRedisCommandTimeout(connection, operation) {
   let timer;
+  // A promise that rejects if the timeout fires.
   const deadline = new Promise((resolve, reject) => {
     timer = setTimeout(() => {
+      // Reject with an Error returned by unavailable().
       reject(unavailable());
+      // Rejecting does not stop this callback.
       if (connection.isOpen) connection.destroy();
     }, TIMEOUT_MS);
   });
   try {
+    // Wait for either command completion or timeout failure.
     return await Promise.race([Promise.resolve().then(operation), deadline]);
   } finally {
+    // Cancel the timer if it has not already fired.
     clearTimeout(timer);
   }
 }

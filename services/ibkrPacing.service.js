@@ -1,4 +1,5 @@
-// STEP 4 SIMPLIFIED: one request budget shared by this running Node process.
+// This pacing service (Rate limiter) is currently not in use. Redis Pacing Service (Redis Rate Limiter) is currently active
+// One request budget shared by this running Node process.
 // Multiple backend processes would need a shared limiter.
 import { performance } from 'node:perf_hooks';
 

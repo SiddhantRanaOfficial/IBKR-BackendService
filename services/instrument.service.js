@@ -68,3 +68,11 @@ function normalizeInstrument(instrument) {
     exchange: textOrNull(instrument.description)
   };
 }
+
+// Reuse normalization before ranking/capping.
+// Earlier service remains unchanged above for reference and its existing tests.
+export function normalizeInstrumentSearchResponse(response) {
+  if (!Array.isArray(response)) throw malformedResponse();
+  return response.map(normalizeInstrument);
+}
+
