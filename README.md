@@ -356,6 +356,8 @@ Return consistent JSON to the frontend
 
 Both naming styles appear in IBKR's documentation. Missing optional text becomes null; missing valid exchanges becomes an empty array. Every supplied contract-ID alias must match the requested ID. A missing/wrong ID or invalid field type returns 502.
 
+Text aliases are trimmed before choosing a value, so an empty or whitespace-only preferred field can fall back to its populated alternative. If both symbol aliases or both security-type aliases are populated, they must match exactly after trimming; conflicts return 502. Company-name and exchange-list aliases retain the preferred field when it is populated. Contract IDs keep their stricter validation, and exchange lists still expect comma-separated text from IBKR.
+
 `listingExchange` and `exchange` are separate: SMART routing is not a primary listing venue. The backend does not infer a listing exchange from the list of available venues. These fields do not establish account permissions or subscription entitlements.
 
 Details currently makes one upstream call per successful admission. There is no details cache, snapshot preflight, or automatic retry. It returns metadata, not prices or a trading schedule.
