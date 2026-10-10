@@ -14,6 +14,7 @@ The frontend is still to be built. A browser helper is included for autocomplete
 - [Instrument search](#instrument-search)
 - [Autocomplete and search caching](#autocomplete-and-search-caching)
 - [Instrument details](#instrument-details)
+- [Trading schedules](#trading-schedules)
 - [Using the endpoints together](#using-the-endpoints-together)
 - [Errors and response conventions](#errors-and-response-conventions)
 - [Code layout](#code-layout)
@@ -80,6 +81,7 @@ All paths below are relative to the backend host.
 | GET | `/api/marketdata/history?conid=265598&period=1d&bar=5min` | Return historical OHLCV bars |
 | GET | `/api/instruments/search?q=AAPL&mode=symbol&limit=10` | Search and rank instrument candidates |
 | GET | `/api/instruments/265598` | Return metadata for the selected contract |
+| GET | `/api/instruments/265598/schedule?exchange=ISLAND` | Return scheduled regular/extended hours; exchange is optional |
 
 A `conid` is IBKR's contract identifier. Search accepts a human-readable symbol or company name; the selected result supplies the ID used for details, quotes, and history. Contract IDs must be positive integers within JavaScript's safe integer range, without leading zeros.
 
@@ -362,6 +364,96 @@ Text aliases are trimmed before choosing a value, so an empty or whitespace-only
 
 Details currently makes one upstream call per successful admission. There is no details cache, snapshot preflight, or automatic retry. It returns metadata, not prices or a trading schedule.
 
+## Trading schedules
+
+```http
+GET /api/instruments/265598/schedule
+GET /api/instruments/265598/schedule?exchange=ISLAND
+```
+
+This endpoint supplies opening and closing intervals for the future chart's session labels. A session is a scheduled period during which trading takes place. Regular hours describe the main session; extended hours describe the broader trading window returned by IBKR and may overlap regular hours. They are not necessarily two separate pre-market and after-market periods.
+
+The backend calls `GET /contract/trading-schedule`. IBKR documents a short window of six days around the current trading day and omits non-trading days. The endpoint does not accept a custom date range. A missing date is not labelled as a holiday, and this response is not a complete market calendar. When `exchange` is omitted, IBKR chooses its primary-exchange default; the backend does not substitute SMART or guess a venue.
+
+```text
+GET /api/instruments/:conid/schedule?exchange=...
+        ↓
+Validate contract ID and optional exchange
+        ↓
+Obtain or reuse the IBKR session token
+        ↓
+Shared authenticated GET helper → Redis pacing
+        ↓
+GET /contract/trading-schedule?conid=...&exchange=...
+        ↓
+Validate dates, intervals, and optional fields
+        ↓
+Convert epoch seconds to milliseconds; sort dates and intervals
+        ↓
+Return the exchange timezone and scheduled sessions
+```
+
+Only the optional `exchange` query parameter is accepted. It must be a single nonempty string of up to 64 characters after trimming, with no control characters. Invalid input returns 400 before authentication. Exchange values are URL-encoded; whether the venue is valid for a contract is determined upstream.
+
+The response below illustrates normalization of one date from IBKR's documentation. It is not a current schedule fetched from an account:
+
+```json
+{
+  "success": true,
+  "source": "ibkr",
+  "data": {
+    "conid": "265598",
+    "requestedExchange": null,
+    "exchangeTimeZone": "US/Central",
+    "timestampUnit": "milliseconds",
+    "days": [
+      {
+        "date": "2025-12-18",
+        "sessions": [
+          {
+            "regularHours": [
+              { "openingTime": 1766068200000, "closingTime": 1766095200000 }
+            ],
+            "extendedHours": [
+              {
+                "openingTime": 1766012400000,
+                "closingTime": 1766095200000,
+                "cancelDailyOrders": true
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `conid` | Requested contract ID, retained as a string |
+| `requestedExchange` | The query's exchange, or null if omitted; not a resolved listing venue |
+| `exchangeTimeZone` | IBKR's exchange timezone, or null when not supplied |
+| `timestampUnit` | `milliseconds`, suitable for `new Date(value)` |
+| `days[].date` | IBKR's trading-date label formatted as YYYY-MM-DD |
+| `days[].sessions` | One or more session groups for that date |
+| `regularHours` | Normalized `liquid_hours` intervals |
+| `extendedHours` | Normalized `extended_hours` intervals |
+| `openingTime`, `closingTime` | Absolute epoch timestamps; no manual timezone offset is added |
+| `cancelDailyOrders` | IBKR's `cancel_daily_orders` flag, or null when absent; preserved as metadata |
+
+The documentation's example has one object per date, while its field description allows an array. Both become `sessions: [...]`. Multiple intervals are kept separate; the backend does not fill lunchtime breaks or merge overnight sessions into a single calendar day. An opening can precede the trading-date label, so that label is preserved rather than derived from the opening timestamp.
+
+Missing hour fields become null; explicit empty arrays remain empty arrays. Empty schedules return `days: []`. Invalid dates, non-integer timestamps, reversed/zero-length intervals, and invalid supplied field types return 502. These checks prevent incorrect hours from appearing as a valid schedule.
+
+There is one paced schedule call, no schedule cache, no extra readiness/accounts preflight, and no automatic retry. Existing timeout and Retry-After handling applies. A successful schedule does not establish brokerage readiness or market-data access.
+
+The frontend can display intervals in the supplied exchange timezone or convert the absolute timestamps for the viewer's timezone. It must not treat a missing timezone as the viewer's local exchange timezone. No `isOpen`, halt detection, next-opening calculation, or trading permission decision is currently provided. A published schedule describes planned hours, not real-time trading status.
+
+For example, if a returned regular interval is 09:30–16:00 in the exchange timezone, a chart can show those hours and explain why regular-session candles stop at 16:00. This is an illustrative timetable, not a promise about a particular instrument. Extended-hours data still depends on subscriptions, permissions, and the selected data request.
+
+Reference: [IBKR trading schedule documentation](https://www.interactivebrokers.com/docs/web-api/v1/endpoints/contract/trading-schedule-new).
+
 ## Using the endpoints together
 
 The intended frontend flow is:
@@ -374,7 +466,8 @@ Search a symbol or company → Show instrument candidates
 Select a candidate → Retain its conid
         ├── Instrument details → Name, currency, security type, exchanges
         ├── Quote snapshot    → Last price, bid, ask, availability
-        └── Historical bars  → OHLCV data for the chart
+        ├── Historical bars  → OHLCV data for the chart
+        └── Trading schedule → Regular/extended session intervals and timezone
 ```
 
 Each branch is a separate HTTP request. Search and details obtain a session but do not perform the explicit brokerage-readiness check used by snapshots and history. Their success should not be treated as proof that market-data access is ready.
@@ -431,6 +524,8 @@ Contract-ID representation currently differs by endpoint: search/details return 
 | `services/instrumentAutocomplete.service.js` | Active search service, filtering, ranking, concurrent request reuse |
 | `services/instrumentSearchCache.service.js` | Search cache keys, validation, reads and expiry |
 | `services/instrumentDetails.service.js` | Contract-details request and normalization |
+| `services/tradingSchedule.service.js` | Trading-schedule request, interval validation, timestamp normalization |
+| `validation/tradingSchedule.validation.js`, `middleware/tradingScheduleValidation.middleware.js`, `controllers/tradingSchedule.controller.js` | Schedule input rules, middleware, and HTTP response |
 | `services/redis.service.js`, `services/ibkrRedisPacing.service.js`, `redis/` | Redis lifecycle and shared pacing |
 | `examples/instrumentSearch.client.js` | Browser autocomplete request helper |
 | `scripts/` | Redis connectivity and cooldown-recovery utilities |
@@ -457,7 +552,7 @@ The integration suites default to local Redis on port 6379; `TEST_REDIS_URL` can
 Still to build or verify:
 
 - Live IBKR authentication, response shapes, data access, and search-pattern behavior.
-- Trading hours and schedules.
+<!-- Previously planned: Trading hours and schedules. Now implemented above. -->
 - WebSocket market-data subscriptions and delivery to the future frontend.
 - React search UI and a live chart using Liveline.
 - Independent distribution of search-cache keys if moving to Redis Cluster.

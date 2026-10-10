@@ -5,11 +5,16 @@ import { validateInstrumentSearchQuery } from '../middleware/instrumentValidatio
 import { searchInstrumentsController } from '../controllers/instrument.controller.js';
 import { validateInstrumentDetails } from '../middleware/instrumentDetailsValidation.middleware.js';
 import { getInstrumentDetailsController } from '../controllers/instrumentDetails.controller.js';
+import { validateTradingSchedule } from '../middleware/tradingScheduleValidation.middleware.js';
+import { getTradingScheduleController } from '../controllers/tradingSchedule.controller.js';
 
 const router = Router();
 
 // Validation runs first so bad searches use no authentication or IBKR allowance.
 router.get('/search', validateInstrumentSearchQuery, ensureIBKRSession, searchInstrumentsController);
+
+// Invalid input must not start authentication.
+router.get('/:conid/schedule', validateTradingSchedule, ensureIBKRSession, getTradingScheduleController);
 
 // Keep /search first so Express does not interpret "search" as a contract ID.
 // /api/instruments/265598 → req.params.conid = "265598"
